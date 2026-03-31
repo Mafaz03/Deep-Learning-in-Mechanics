@@ -289,13 +289,13 @@ def train(epochs, optimizer,
             E_predictor_model.train()
 
             optimizer.zero_grad()
-            interior_data = get_interior(train_data) 
-            IC_data       = get_initial(train_data) # u, u_t (exact at t = 0)
-            BC_data       = get_BC(train_data) # t at u = 0 and t at u = L
+            interior_data             = get_interior(train_data) 
+            _, IC_data_u, IC_data_u_t = get_initial(train_data) # u, u_t (exact at t = 0)
+            BC_data                   = get_BC(train_data) # t at u = 0 and t at u = L
 
 
             interior_residue  = get_interior_residual(u_predictor_model, E_predictor_model, interior_data)
-            IC_residue        = get_IC_residue(u_predictor_model, u_0, v_0, IC_data)
+            IC_residue        = get_IC_residue(u_predictor_model, u_0, v_0, (IC_data_u, IC_data_u_t))
             BC_residue        = get_BC_residue(u_predictor_model, BC_data)
 
             loss_pde = torch.mean(interior_residue**2)
