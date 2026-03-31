@@ -9,7 +9,7 @@ from matplotlib import patches
 
 
 
-def inference(domain, u_model, E_model, u_0, v_0):
+def inference(domain, u_model, f, g, a, epsilon):
     domain = domain.clone()
 
     x_s = torch.linspace(domain[0][0], domain[0][1], 100)
@@ -24,57 +24,47 @@ def inference(domain, u_model, E_model, u_0, v_0):
 
     grad_u = torch.autograd.grad(u.sum(), points, create_graph=True)[0]
 
-    u_x = grad_u[:, 0]
-    u_t = grad_u[:, 1]
-
-    E = E_model(u_x.unsqueeze(1))
+    u_x  = grad_u[:, 0]
+    u_xx = torch.autograd.grad(u_x.sum(), points, create_graph=True)[0][:, 0]
+    u_t  = grad_u[:, 1]
 
     U = u.reshape(100, 100)
 
-    fig, axs = plt.subplots(1, 2, figsize=(18, 5))
-    im = axs[0].contourf(
+    fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+    im = ax.contourf(
         X.detach().numpy(),
         T.detach().numpy(),
-        U.detach().numpy(),
+        U.detach().numpy().T,
         levels=50   
     )
 
-    # bc loss
-    bc_loss = torch.mean((U[:, 0]**2) + (U[:, -1]**2))
+    # bc loss (x = x_min and x = x_max → functions of t)
+    t_vals = T[0, :]
+    bc_loss = torch.mean((U[0, :] - g(t_vals))**2 + (U[-1, :] - g(t_vals))**2)
 
-    # ic loss
-    u_t = u_t.reshape(100, 100)
-
-    u_t_0 = u_t[:, 0] 
-    ic_loss = torch.mean(((U[:, 0] - u_0(x_s))**2) + ((u_t_0 - v_0(x_s))**2))
+    # ic loss (t = 0 → use x)
+    ic_loss = torch.mean((U[:, 0] - f(x_s))**2)
 
     # interior loss
-    grad_u = torch.autograd.grad(u.sum(), points, create_graph = True)[0]
-    u_x = grad_u[:, 0]
-    u_t = grad_u[:, 1]
-    u_tt = torch.autograd.grad(u_t.sum(), points, create_graph=True)[0][:, 1]
-    E = E_model(u_x.unsqueeze(1)).squeeze()
-    flux = E * u_x
-    flux_x = torch.autograd.grad(
-        flux.sum(), points, create_graph=True
-    )[0][:, 0]
+    u_x  = u_x.reshape(100, 100)
+    u_t  = u_t.reshape(100, 100)
+    u_xx = u_xx.reshape(100, 100)
 
-    interior_residual = u_tt - flux_x
+    # remove boundaries
+    interior_residual = (
+        u_t[1:-1, 1:-1] +
+        a * u_x[1:-1, 1:-1] -
+        epsilon * u_xx[1:-1, 1:-1]
+    )
+    interior_residual = u_t + (a * u_x) - (epsilon * u_xx)
+    
     loss_pde = torch.mean(interior_residual**2)
 
 
-    fig.colorbar(im, ax=axs[0])
-    axs[0].set_xlabel("x")
-    axs[0].set_ylabel("t")
-    axs[0].set_title(f"u(x,t) | interior loss: {loss_pde.item():.4f} | ic loss: {ic_loss.item():.4f} | bc loss: {bc_loss.item():.4f}")
-
-
-    epsilon = u_x.detach().numpy()
-    E_vals  = E.detach().numpy()
-    axs[1].scatter(epsilon, E_vals, s=1)
-    axs[1].set_xlabel(r"strain ($\varepsilon = \frac{\partial u}{\partial x}$)")
-    axs[1].set_ylabel("E(ε) (prediction)")
-    axs[1].set_title("Learned Material Law")
+    fig.colorbar(im, ax=ax)
+    ax.set_xlabel("x")
+    ax.set_ylabel("t")
+    ax.set_title(f"u(x,t) | interior loss: {loss_pde.item():.4f} | ic loss: {ic_loss.item():.4f} | bc loss: {bc_loss.item():.4f}")
 
     rect = patches.Rectangle(
         (0, 0),   
@@ -85,11 +75,10 @@ def inference(domain, u_model, E_model, u_0, v_0):
         facecolor='none'
     )
 
-    axs[0].add_patch(rect)
+    ax.add_patch(rect)
 
     plt.tight_layout()
     plt.show()
-
 
 
 
@@ -248,12 +237,12 @@ def grad_norm(loss, models):
 
 
 def train(epochs, optimizer, 
-          u_predictor_model, E_predictor_model, 
+          u_predictor_model, 
           train_dataloader, test_dataloader, 
           get_interior, get_initial, get_BC,
           get_interior_residual, get_IC_residue, get_BC_residue, 
           domain,
-          u_0, v_0,
+          g, f, alpha, epsilon,
           lr_annealing_decay = None, initial_lr = 1e-3, lambda_scaling: bool = False):
     
     epoch_loss_track = []
@@ -290,24 +279,23 @@ def train(epochs, optimizer,
 
         for train_data in train_dataloader:
             u_predictor_model.train()
-            E_predictor_model.train()
 
             optimizer.zero_grad()
-            interior_data   = get_interior(train_data, domain) 
-            IC_data         = get_initial(train_data, domain, u_0, v_0) # u, u_t (exact at t = 0)
-            BC_data         = get_BC(train_data, domain) # t at u = 0 and t at u = L
+            interior_data        = get_interior(train_data, domain) 
+            IC_data, IC_data_u   = get_initial(train_data, domain, f) # u, u_t (exact at t = 0)
+            BC_data              = get_BC(train_data, domain, g) # t at u = 0 and t at u = L
 
 
-            interior_residue  = get_interior_residual(u_predictor_model, E_predictor_model, interior_data)
-            IC_residue        = get_IC_residue(u_predictor_model, IC_data)
-            BC_residue        = get_BC_residue(u_predictor_model, BC_data)
+            interior_residue           = get_interior_residual(u_predictor_model, interior_data, alpha, epsilon)
+            IC_residue                 = get_IC_residue(u_predictor_model, (IC_data, IC_data_u))
+            BC_residue_1, BC_residue_2 = get_BC_residue(u_predictor_model, BC_data)
 
             loss_pde = torch.mean(interior_residue**2)
-            loss_ic  = torch.mean((IC_residue[0]**2) + (IC_residue[1]**2))
-            loss_bc  = torch.mean((BC_residue[0]**2) + (BC_residue[1]**2))
+            loss_ic  = torch.mean(IC_residue**2)
+            loss_bc  = torch.mean((BC_residue_1**2) + (BC_residue_2**2))
 
             # gradient mismatach
-            models = [u_predictor_model, E_predictor_model]
+            models = [u_predictor_model]
             g_pde = grad_norm(loss_pde, models)
             g_ic  = grad_norm(loss_ic, models)
             g_bc  = grad_norm(loss_bc, models)
@@ -340,9 +328,6 @@ def train(epochs, optimizer,
             grad_tracker["ic"].append(g_ic.item())
             grad_tracker["bc"].append(g_bc.item())
 
-        # grad_tracker["pde"].append((g_pde_epoch / len(train_dataloader)).item())
-        # grad_tracker["ic"].append((g_ic_epoch / len(train_dataloader)).item())
-        # grad_tracker["bc"].append((g_bc_epoch / len(train_dataloader)).item())
 
         # scaling lambda
         g_pde_mean = np.mean([g.item() for g in g_pdes])
@@ -375,21 +360,19 @@ def train(epochs, optimizer,
         for test_data in test_dataloader:
             
             u_predictor_model.eval()
-            E_predictor_model.eval()
 
-            interior_data   = get_interior(test_data, domain) 
-            IC_data         = get_initial(test_data, domain, u_0, v_0) # u, u_t (exact at t = 0)
-            BC_data         = get_BC(test_data, domain) # t at u = 0 and t at u = L
+            interior_data        = get_interior(test_data, domain) 
+            IC_data, IC_data_u   = get_initial(test_data, domain, f) # u, u_t (exact at t = 0)
+            BC_data              = get_BC(test_data, domain, g) # t at u = 0 and t at u = L
 
 
-            interior_residue  = get_interior_residual(u_predictor_model, E_predictor_model, interior_data)
-            IC_residue        = get_IC_residue(u_predictor_model, IC_data)
-            BC_residue        = get_BC_residue(u_predictor_model, BC_data)
-
+            interior_residue           = get_interior_residual(u_predictor_model, interior_data, alpha, epsilon)
+            IC_residue                 = get_IC_residue(u_predictor_model, (IC_data, IC_data_u))
+            BC_residue_1, BC_residue_2 = get_BC_residue(u_predictor_model, BC_data)
 
             loss_pde = torch.mean(interior_residue**2)
-            loss_ic  = torch.mean((IC_residue[0]**2) + (IC_residue[1]**2))
-            loss_bc  = torch.mean((BC_residue[0]**2) + (BC_residue[1]**2))
+            loss_ic  = torch.mean(IC_residue**2)
+            loss_bc  = torch.mean((BC_residue_1**2) + (BC_residue_2**2))
 
             # total
             if lambda_scaling:
