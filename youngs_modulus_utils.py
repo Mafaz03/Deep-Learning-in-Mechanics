@@ -31,7 +31,7 @@ def inference(domain, u_model, E_model, u_0, v_0):
 
     U = u.reshape(100, 100)
 
-    fig, axs = plt.subplots(1, 2, figsize=(18, 5))
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5))
     im = axs[0].contourf(
         X.detach().numpy(),
         T.detach().numpy(),
@@ -67,15 +67,6 @@ def inference(domain, u_model, E_model, u_0, v_0):
     axs[0].set_xlabel("x")
     axs[0].set_ylabel("t")
     axs[0].set_title(f"u(x,t) | interior loss: {loss_pde.item():.4f} | ic loss: {ic_loss.item():.4f} | bc loss: {bc_loss.item():.4f}")
-
-
-    epsilon = u_x.detach().numpy()
-    E_vals  = E.detach().numpy()
-    axs[1].scatter(epsilon, E_vals, s=1)
-    axs[1].set_xlabel(r"strain ($\varepsilon = \frac{\partial u}{\partial x}$)")
-    axs[1].set_ylabel("E(ε) (prediction)")
-    axs[1].set_title("Learned Material Law")
-
     rect = patches.Rectangle(
         (0, 0),   
         1,
@@ -84,8 +75,29 @@ def inference(domain, u_model, E_model, u_0, v_0):
         edgecolor='r',
         facecolor='none'
     )
-
     axs[0].add_patch(rect)
+
+    epsilon = u_x.detach().numpy()
+    E_vals  = E.detach().numpy()
+    
+    axs[1].scatter(epsilon, E_vals, s=1)
+
+    axs[1].set_xlabel(r"strain ($\varepsilon = \frac{\partial u}{\partial x}$)")
+    axs[1].set_ylabel("E(ε) (prediction)")
+    axs[1].set_title("Learned Material Law")
+
+
+    
+    idx = np.argsort(epsilon)
+    epsilon_sorted = epsilon[idx]
+    E_sorted = E_vals[idx]
+
+    d_eps = np.gradient(epsilon_sorted)
+    sigma = np.cumsum(E_sorted * d_eps)
+    axs[2].plot(epsilon_sorted, sigma)
+    axs[2].set_xlabel("strain")
+    axs[2].set_ylabel("stress")
+    axs[2].set_title("Stress vs strain")
 
     plt.tight_layout()
     plt.show()

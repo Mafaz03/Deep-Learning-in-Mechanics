@@ -9,7 +9,7 @@ from matplotlib import patches
 
 
 
-def inference(domain, u_model, f, g, a, epsilon):
+def inference(domain, u_model, f, g, a, epsilon, title = None):
     domain = domain.clone()
 
     x_s = torch.linspace(domain[0][0], domain[0][1], 100)
@@ -76,6 +76,8 @@ def inference(domain, u_model, f, g, a, epsilon):
     )
 
     ax.add_patch(rect)
+
+    if title: fig.suptitle(title)
 
     plt.tight_layout()
     plt.show()
@@ -403,4 +405,4 @@ def train(epochs, optimizer,
             for param_group in optimizer.param_groups:
                 param_group['lr'] = new_lr
 
-    return epoch_loss_track, epoch_loss_track_test, residue_tracker, grad_tracker, lambda_tracker
+    return epoch_loss_track, epoch_loss_track_test, residue_tracker, grad_tracker, lambda_tracker, u_predictor_model
