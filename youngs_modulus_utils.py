@@ -9,7 +9,7 @@ from matplotlib import patches
 
 
 
-def inference(domain, u_model, E_model, u_0, v_0):
+def inference(domain, u_model, E_model, E_exact, u_0, v_0):
     domain = domain.clone()
 
     x_s = torch.linspace(domain[0][0], domain[0][1], 100)
@@ -53,8 +53,9 @@ def inference(domain, u_model, E_model, u_0, v_0):
     u_x = grad_u[:, 0]
     u_t = grad_u[:, 1]
     u_tt = torch.autograd.grad(u_t.sum(), points, create_graph=True)[0][:, 1]
-    E = E_model(u_x.unsqueeze(1)).squeeze()
-    flux = E * u_x
+    E_predicted = E_model(u_x.unsqueeze(1)).squeeze()
+    E_eaxcts    = E_exact(u_x.unsqueeze(1)).squeeze()
+    flux = E_predicted * u_x
     flux_x = torch.autograd.grad(
         flux.sum(), points, create_graph=True
     )[0][:, 0]
@@ -78,32 +79,33 @@ def inference(domain, u_model, E_model, u_0, v_0):
     axs[0].add_patch(rect)
 
     epsilon = u_x.detach().numpy()
-    E_vals  = E.detach().numpy()
+    E_vals_predicted  = E_predicted.detach().numpy()
+    E_vals_exact       = E_eaxcts.detach().numpy()
     
-    axs[1].scatter(epsilon, E_vals, s=1)
-
+    axs[1].scatter(epsilon, E_vals_predicted, s=1, label = "predicted")
+    axs[1].scatter(epsilon, E_vals_exact, s=1, label = "exact")
+    axs[1].legend()
     axs[1].set_xlabel(r"strain ($\varepsilon = \frac{\partial u}{\partial x}$)")
-    axs[1].set_ylabel("E(ε) (prediction)")
+    axs[1].set_ylabel("E(ε)")
     axs[1].set_title("Learned Material Law")
-
-
     
     idx = np.argsort(epsilon)
     epsilon_sorted = epsilon[idx]
-    E_sorted = E_vals[idx]
+    E_sorted_predicted = E_vals_predicted[idx]
+    E_sorted_exact = E_vals_exact[idx]
 
     d_eps = np.gradient(epsilon_sorted)
-    sigma = np.cumsum(E_sorted * d_eps)
-    axs[2].plot(epsilon_sorted, sigma)
+    sigma_predicted = np.cumsum(E_sorted_predicted * d_eps)
+    sigma_exact = np.cumsum(E_sorted_exact * d_eps)
+    axs[2].plot(epsilon_sorted, sigma_predicted, label = "predicted")
+    axs[2].plot(epsilon_sorted, sigma_exact, label = "exact")
+    axs[2].legend()
     axs[2].set_xlabel("strain")
     axs[2].set_ylabel("stress")
     axs[2].set_title("Stress vs strain")
 
     plt.tight_layout()
     plt.show()
-
-
-
 
 
 def smooth(x, w):
@@ -261,9 +263,10 @@ def grad_norm(loss, models):
 
 def train(epochs, optimizer, 
           u_predictor_model, E_predictor_model, 
+          E_exact,
           train_dataloader, test_dataloader, 
           get_interior, get_initial, get_BC,
-          get_interior_residual, get_IC_residue, get_BC_residue, 
+          get_interior_residual, get_IC_residue, get_BC_residue, get_E_residue,
           domain,
           u_0, v_0,
           lr_annealing_decay = None, initial_lr = 1e-3, lambda_scaling: bool = False):
@@ -274,13 +277,15 @@ def train(epochs, optimizer,
     grad_tracker = {
         "pde": [],
         "ic": [],
-        "bc": []
+        "bc": [],
+        "E": []
     }
 
     lambda_pde = 1
     lambda_ic = 1
     lambda_bc = 1
-    lambda_tracker = {"pde": [], "ic": [], "bc": []}
+    lambda_E = 1
+    lambda_tracker = {"pde": [], "ic": [], "bc": [], "E": []}
 
     for epoch in range(epochs):
 
@@ -291,14 +296,17 @@ def train(epochs, optimizer,
         epoch_loss_PDE = 0
         epoch_loss_IC = 0
         epoch_loss_BC = 0
+        epoch_loss_E = 0
 
         g_pde_epoch = 0
         g_ic_epoch = 0
         g_bc_epoch = 0
+        g_E_epoch = 0
 
         g_pdes = []
         g_ics = []
         g_bcs = []
+        g_Es = []
 
         for train_data in train_dataloader:
             u_predictor_model.train()
@@ -309,40 +317,45 @@ def train(epochs, optimizer,
             IC_data         = get_initial(train_data, domain, u_0, v_0) # u, u_t (exact at t = 0)
             BC_data         = get_BC(train_data, domain) # t at u = 0 and t at u = L
 
-
             interior_residue  = get_interior_residual(u_predictor_model, E_predictor_model, interior_data)
             IC_residue        = get_IC_residue(u_predictor_model, IC_data)
             BC_residue        = get_BC_residue(u_predictor_model, BC_data)
+            E_residue         = get_E_residue(E_predictor_model, E_exact, u_predictor_model, interior_data)
 
             loss_pde = torch.mean(interior_residue**2)
             loss_ic  = torch.mean((IC_residue[0]**2) + (IC_residue[1]**2))
             loss_bc  = torch.mean((BC_residue[0]**2) + (BC_residue[1]**2))
+            loss_E   = torch.mean(E_residue**2)
 
             # gradient mismatach
             models = [u_predictor_model, E_predictor_model]
             g_pde = grad_norm(loss_pde, models)
             g_ic  = grad_norm(loss_ic, models)
             g_bc  = grad_norm(loss_bc, models)
+            g_E  = grad_norm(loss_E, models)
 
             g_pdes.append(g_pde)
             g_ics.append(g_ic)
             g_bcs.append(g_bc)
+            g_Es.append(g_E)
 
             g_pde_epoch += g_pde
             g_ic_epoch  += g_ic
             g_bc_epoch  += g_bc
+            g_E_epoch   += g_E
 
             # total of iniduvidual residue
             epoch_loss_PDE += loss_pde
             epoch_loss_IC += loss_ic
             epoch_loss_BC += loss_bc
+            epoch_loss_E += loss_E
 
             # total
             if lambda_scaling:
-                loss = (lambda_pde * loss_pde) + (lambda_ic * loss_ic) + (lambda_bc * loss_bc)
+                loss = (lambda_pde * loss_pde) + (lambda_ic * loss_ic) + (lambda_bc * loss_bc) + (lambda_E * loss_E)
             else:
-                lambda_pde, lambda_ic, lambda_bc = 1, 1, 1
-                loss =  loss_pde +  loss_ic +  loss_bc
+                lambda_pde, lambda_ic, lambda_bc, lambda_E = 1, 1, 1, 1
+                loss =  loss_pde +  loss_ic +  loss_bc +  loss_E
 
             epoch_loss += loss
             loss.backward()
@@ -351,34 +364,42 @@ def train(epochs, optimizer,
             grad_tracker["pde"].append(g_pde.item())
             grad_tracker["ic"].append(g_ic.item())
             grad_tracker["bc"].append(g_bc.item())
+            grad_tracker["E"].append(g_E.item())
 
         # scaling lambda
         g_pde_mean = np.mean([g.item() for g in g_pdes])
         g_ic_mean  = np.mean([g.item() for g in g_ics])
         g_bc_mean  = np.mean([g.item() for g in g_bcs])
-        g_max_mean = max(g_pde_mean, g_ic_mean, g_bc_mean)
+        g_E_mean   = np.mean([g.item() for g in g_Es])
+        g_max_mean = max(g_pde_mean, g_ic_mean, g_bc_mean, g_E_mean)
 
         beta = 0.9
         # lambda_pde = beta * lambda_pde + (1 - beta) * (g_max_mean / (g_pde_mean + 1e-8))
         lambda_ic  = beta * lambda_ic  + (1 - beta) * (g_max_mean / (g_ic_mean  + 1e-8))
         lambda_bc  = beta * lambda_bc  + (1 - beta) * (g_max_mean / (g_bc_mean  + 1e-8))
+        lambda_E   = beta * lambda_E   + (1 - beta) * (g_max_mean / (g_E_mean   + 1e-8))
 
         lambda_pde = float(np.clip(lambda_pde, 0.05, 100.0))
         lambda_ic  = float(np.clip(lambda_ic,  0.05, 100.0))
         lambda_bc  = float(np.clip(lambda_bc,  0.05, 100.0))
+        lambda_E   = float(np.clip(lambda_E,  0.05, 100.0))
 
         if lambda_scaling:
             lambda_tracker["pde"].append(lambda_pde)
             lambda_tracker["ic"].append(lambda_ic)
             lambda_tracker["bc"].append(lambda_bc)
+            lambda_tracker["E"].append(lambda_E)
         else:
             lambda_tracker["pde"].append(1)
             lambda_tracker["ic"].append(1)
             lambda_tracker["bc"].append(1)
+            lambda_tracker["E"].append(1)
 
         residue_tracker[epoch].extend((epoch_loss_PDE.item()/len(train_dataloader), 
                                     epoch_loss_IC.item()/len(train_dataloader), 
-                                    epoch_loss_BC.item()/len(train_dataloader)))
+                                    epoch_loss_BC.item()/len(train_dataloader),
+                                    epoch_loss_E.item()/len(train_dataloader),
+                                    ))
 
         for test_data in test_dataloader:
             
@@ -393,18 +414,20 @@ def train(epochs, optimizer,
             interior_residue  = get_interior_residual(u_predictor_model, E_predictor_model, interior_data)
             IC_residue        = get_IC_residue(u_predictor_model, IC_data)
             BC_residue        = get_BC_residue(u_predictor_model, BC_data)
+            E_residue         = get_E_residue(E_predictor_model, E_exact, u_predictor_model, interior_data)
 
 
             loss_pde = torch.mean(interior_residue**2)
             loss_ic  = torch.mean((IC_residue[0]**2) + (IC_residue[1]**2))
             loss_bc  = torch.mean((BC_residue[0]**2) + (BC_residue[1]**2))
+            loss_E   = torch.mean(E_residue**2)
 
             # total
             if lambda_scaling:
-                loss = (lambda_pde * loss_pde) + (lambda_ic * loss_ic) + (lambda_bc * loss_bc)
+                loss = (lambda_pde * loss_pde) + (lambda_ic * loss_ic) + (lambda_bc * loss_bc) + (lambda_E * loss_E)
             else:
-                lambda_pde, lambda_ic, lambda_bc = 1, 1, 1
-                loss =  loss_pde +  loss_ic +  loss_bc
+                lambda_pde, lambda_ic, lambda_bc, lambda_E = 1, 1, 1, 1
+                loss =  loss_pde +  loss_ic +  loss_bc +  loss_E
             epoch_loss_test += loss
 
 
