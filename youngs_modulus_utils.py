@@ -352,10 +352,6 @@ def train(epochs, optimizer,
             grad_tracker["ic"].append(g_ic.item())
             grad_tracker["bc"].append(g_bc.item())
 
-        # grad_tracker["pde"].append((g_pde_epoch / len(train_dataloader)).item())
-        # grad_tracker["ic"].append((g_ic_epoch / len(train_dataloader)).item())
-        # grad_tracker["bc"].append((g_bc_epoch / len(train_dataloader)).item())
-
         # scaling lambda
         g_pde_mean = np.mean([g.item() for g in g_pdes])
         g_ic_mean  = np.mean([g.item() for g in g_ics])
