@@ -56,7 +56,6 @@ def inference(domain, u_model, f, g, a, epsilon, title = None):
         a * u_x[1:-1, 1:-1] -
         epsilon * u_xx[1:-1, 1:-1]
     )
-    interior_residual = u_t + (a * u_x) - (epsilon * u_xx)
     
     loss_pde = torch.mean(interior_residual**2)
 
@@ -81,6 +80,8 @@ def inference(domain, u_model, f, g, a, epsilon, title = None):
 
     plt.tight_layout()
     plt.show()
+    
+    return X.detach().numpy(), T.detach().numpy(), U.detach().numpy()
 
 
 
@@ -284,6 +285,7 @@ def train(epochs, optimizer,
 
             optimizer.zero_grad()
             interior_data        = get_interior(train_data, domain) 
+            interior_data.requires_grad_(True)
             IC_data, IC_data_u   = get_initial(train_data, domain, f) # u, u_t (exact at t = 0)
             BC_data              = get_BC(train_data, domain, g) # t at u = 0 and t at u = L
 
